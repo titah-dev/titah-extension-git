@@ -1,0 +1,33 @@
+{
+  "name": "@titah/extension-git",
+  "version": "0.1.0",
+  "description": "Git side panel for Titah — current branch, local branches, worktrees, changed files",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6",
+    "titah": "^0.2.0"
+  },
+  "titah": {
+    "panel": "./dist/panel.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build --silent && node --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "titah-code": "^0.2.1",
+    "typescript": "^5.9.0"
+  },
+  "keywords": ["titah", "titah-extension", "git"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/titah-dev/titah-extension-git.git"
+  }
+}
