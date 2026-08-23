@@ -12,7 +12,7 @@ local branches, worktrees, and how many files changed.
 │ feature/panels   │
 │ hotfix           │
 │                  │
-│ b branches · r … │
+│ r refresh        │
 ╰──────────────────╯
 ```
 
@@ -41,9 +41,31 @@ Or name it yourself:
 | `branchLimit` | `12` | How many other branches to list in the summary |
 | `worktrees` | `true` | Show the worktree list. Hidden anyway when there is only one |
 
-Give the panel the keyboard with `Ctrl+X` `F`, then: `b` toggles the full branch
-list, `r` refreshes, `Esc` hands the keyboard back. `+` / `-` / `=` resize the
-panel — those are Titah's, not this extension's.
+Give the panel the keyboard with `Ctrl+X` `F`, then `r` refreshes and `Esc` hands
+it back. `+` / `-` / `=` resize the panel — those are Titah's, not this
+extension's.
+
+### About `b`, and why it is usually not offered
+
+`b` toggles a full branch list, and the hint line only mentions it **when there
+are branches you cannot already see** — then it says how many: `b +3 more · r
+refresh`.
+
+The reason is measured rather than assumed. With the default `branchLimit` of 12,
+an ordinary repository already shows **every** branch in the summary, so the full
+list contributes nothing: pressing `b` would drop the counts line and reorder the
+same names. A key that is advertised and does nothing teaches people that this
+panel's hints cannot be trusted — and that costs `r` too.
+
+The key still **works** when it is not advertised. That is the right direction to
+err: a key that exists without being promised is a small surprise, while a key
+that is promised without existing is a broken promise.
+
+Known limit, stated rather than discovered: the full list **does not scroll**. It
+is truncated to the panel height, so on a repository with thirty branches in a
+nine-row panel you see the first nine and no more. If that is your situation,
+raise `branchLimit` and make the panel taller, or narrow it down with git
+directly.
 
 **Clicking a branch row highlights it. It does not check out.** A checkout from a
 single click would change the working tree underneath an agent that may be

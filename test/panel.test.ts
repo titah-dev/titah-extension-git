@@ -131,7 +131,10 @@ test("tombol b berpindah ke daftar branch penuh dan kembali", async () => {
 
   assert.equal(panel.onKey?.({ key: "b" })?.refresh, true)
   const back = rowsOf(await panel.render(request))
-  assert.ok(back.some((row) => row.text.includes("b branches")), JSON.stringify(back))
+  // Dicocokkan ke `r refresh` — bagian petunjuk yang SELALU ada. Bagian `b`
+  // hanya muncul kalau ada branch yang tersembunyi, dan test ini tentang
+  // berpindah tampilan, bukan tentang isi petunjuknya.
+  assert.ok(back.some((row) => row.text.includes("r refresh")), JSON.stringify(back))
 })
 
 test("tombol r meminta refresh, tombol lain tidak", async () => {
@@ -208,7 +211,7 @@ test("klik pada baris yang BUKAN branch tidak melakukan apa pun", async () => {
    */
   const panel = await open(repo())
   const rows = rowsOf(await panel.render(request))
-  const hint = rows.findIndex((row) => row.text.includes("b branches"))
+  const hint = rows.findIndex((row) => row.text.includes("r refresh"))
   assert.ok(hint > 0, "baris petunjuk harus ada")
   assert.equal(panel.onClick?.({ row: hint }), undefined)
 
@@ -244,4 +247,43 @@ test("klik tetap bekerja di tampilan daftar branch penuh", async () => {
   panel.onClick?.({ row: index })
   const after = rowsOf(await panel.render(request))
   assert.equal(after[index]?.selected, true)
+})
+
+test("petunjuk `b` TIDAK diiklankan kalau semua branch sudah terlihat", async () => {
+  /*
+   * Diukur, bukan diduga: dengan branchLimit bawaan 12, repo biasa menampilkan
+   * seluruh branch-nya di summary — jadi mode `branches` tidak membawa satu pun
+   * branch tambahan. Tombol yang diiklankan tapi tidak menghasilkan apa pun
+   * mengajari orang bahwa petunjuk di panel ini tidak bisa dipercaya, dan itu
+   * merugikan `r` juga.
+   */
+  const directory = repo()
+  for (const name of ["x", "y", "z"]) execFileSync("git", ["branch", name], { cwd: directory, stdio: "pipe" })
+
+  const rows = rowsOf(await (await open(directory)).render(request))
+  const hint = rows.at(-1)?.text ?? ""
+  assert.equal(hint, "r refresh")
+  assert.ok(!hint.includes("b "), hint)
+})
+
+test("petunjuk `b` muncul dengan JUMLAH yang tersembunyi kalau ada yang dipotong", async () => {
+  const directory = repo()
+  for (let index = 0; index < 5; index++) {
+    execFileSync("git", ["branch", `c${index}`], { cwd: directory, stdio: "pipe" })
+  }
+  // branchLimit 2 → tiga dari lima tersembunyi.
+  const rows = rowsOf(await (await open(directory, { branchLimit: 2 })).render(request))
+  assert.equal(rows.at(-1)?.text, "b +3 more · r refresh")
+})
+
+test("`b` tetap BEKERJA meski tidak diiklankan", async () => {
+  // Arah kesalahan yang benar: tombol yang ada tanpa dijanjikan hanya kejutan
+  // kecil, sedangkan tombol yang dijanjikan tanpa ada adalah janji yang
+  // dilanggar.
+  const directory = repo()
+  execFileSync("git", ["branch", "solo"], { cwd: directory, stdio: "pipe" })
+  const panel = await open(directory)
+  assert.equal(rowsOf(await panel.render(request)).at(-1)?.text, "r refresh")
+  assert.equal(panel.onKey?.({ key: "b" })?.refresh, true)
+  assert.ok(rowsOf(await panel.render(request)).some((row) => row.text === "b back"))
 })

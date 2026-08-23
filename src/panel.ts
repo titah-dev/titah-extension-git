@@ -120,7 +120,9 @@ function summaryRows(
   ].filter(Boolean)
   if (tally.length > 0) rows.push({ text: tally.join(" · "), color: "yellow" })
 
-  const others = state.branches.filter((branch) => branch !== state.branch).slice(0, limits.branchLimit)
+  const candidates = state.branches.filter((branch) => branch !== state.branch)
+  const others = candidates.slice(0, limits.branchLimit)
+  const hidden = candidates.length - others.length
   if (others.length > 0) {
     rows.push({ text: "", dim: true })
     for (const branch of others) {
@@ -139,7 +141,21 @@ function summaryRows(
   }
 
   rows.push({ text: "", dim: true })
-  rows.push({ text: "b branches · r refresh", dim: true })
+  /*
+   * `b` diiklankan HANYA kalau ada branch yang tidak terlihat.
+   *
+   * Diukur, bukan diduga: dengan `branchLimit` bawaan 12, repo biasa
+   * menampilkan SELURUH branch-nya di summary — jadi mode `branches` tidak
+   * membawa satu pun branch tambahan, dan `b` hanya membuang baris hitungan
+   * lalu mengurutkan ulang. Tombol yang diiklankan tapi tidak menghasilkan apa
+   * pun mengajari orang bahwa petunjuk di panel ini tidak bisa dipercaya, dan
+   * itu merugikan `r` juga.
+   *
+   * Tombolnya tetap BEKERJA saat tidak diiklankan. Itu arah kesalahan yang
+   * benar: tombol yang ada tanpa dijanjikan hanya kejutan kecil, sedangkan
+   * tombol yang dijanjikan tanpa ada adalah janji yang dilanggar.
+   */
+  rows.push({ text: hidden > 0 ? `b +${hidden} more · r refresh` : "r refresh", dim: true })
   return rows
 }
 
