@@ -1,20 +1,25 @@
 # @titah/extension-git
 
-A git side panel for [Titah](https://github.com/titah-dev/titah): current branch,
-local branches, worktrees, and how many files changed.
+A lazygit-style git sidebar for [Titah](https://github.com/titah-dev/titah).
+**Read-only** — it watches, it never changes your repository.
 
 ```
-╭──────────────────╮
-│ Git              │
-│ main             │
-│ 1 changed        │
-│                  │
-│ feature/panels   │
-│ hotfix           │
-│                  │
-│ r refresh        │
-╰──────────────────╯
+╭────────────────────────────────╮
+│ Git                            │
+│ Files (2)                      │
+│ › ·M src/tui/panels.ts         │
+│   ?? README.md                 │
+│ Worktrees (1)                  │
+│ Branches (4) main              │
+│ Commits (4)                    │
+│ Stash (1)                      │
+│ tab section · ↑↓ move          │
+╰────────────────────────────────╯
 ```
+
+Five sections, accordion style: the focused one expands, the others collapse to a
+header with their count. `tab` moves forward through them, `↑`/`↓` move the cursor
+inside the open one, and clicking a header opens it.
 
 ## Install
 
@@ -22,99 +27,96 @@ local branches, worktrees, and how many files changed.
 titah extension install @titah/extension-git
 ```
 
-Or name it yourself:
-
 ```jsonc
 {
   "extension": {
     "@titah/extension-git": {
       "side": "left",
       "key": "<leader>g",
-      "options": { "branchLimit": 12, "worktrees": true }
+      "options": { "commitLimit": 50, "start": "files" }
     }
-  }
+  },
+  "panel": { "left": { "width": 34 } }
 }
 ```
 
 | Option | Default | |
 |---|---|---|
-| `branchLimit` | `12` | How many other branches to list in the summary |
-| `worktrees` | `true` | Show the worktree list. Hidden anyway when there is only one |
+| `commitLimit` | `50` | How many commits to list. Reading is capped at 50 regardless |
+| `start` | `"files"` | Which section is open first: `files`, `worktrees`, `branches`, `commits`, `stash` |
 
-Give the panel the keyboard with `Ctrl+X` `F`, then `r` refreshes and `Esc` hands
-it back. `+` / `-` / `=` resize the panel — those are Titah's, not this
-extension's.
+**`width: 34` is the number to use.** That leaves 30 columns inside the frame —
+enough for `a1b2c3 a reasonably short subject` and `·M src/tui/panels.ts` without
+cutting mid-word. At the default 20 a commit hash alone eats a third of the line.
 
-### About `b`, and why it is usually not offered
+## Keys
 
-`b` toggles a full branch list, and the hint line only mentions it **when there
-are branches you cannot already see** — then it says how many: `b +3 more · r
-refresh`.
+`Ctrl+X` `F` hands the keyboard to the panel; `Esc` gives it back without closing
+the panel.
 
-The reason is measured rather than assumed. With the default `branchLimit` of 12,
-an ordinary repository already shows **every** branch in the summary, so the full
-list contributes nothing: pressing `b` would drop the counts line and reorder the
-same names. A key that is advertised and does nothing teaches people that this
-panel's hints cannot be trusted — and that costs `r` too.
+| | |
+|---|---|
+| `tab` | next section, wrapping back to Files |
+| `↑` / `↓` | move the cursor inside the open section |
+| `r` | refresh now |
+| click a header | open that section |
+| click a row | put the cursor there |
+| `+` / `-` / `=` | resize the panel — Titah's keys, not this extension's |
 
-The key still **works** when it is not advertised. That is the right direction to
-err: a key that exists without being promised is a small surprise, while a key
-that is promised without existing is a broken promise.
+**`tab` only goes forward.** `shift+tab` arrives indistinguishable from `tab` — no
+shift flag reaches an extension — and its escape sequence can be read as `escape`,
+which releases panel focus. So going back means pressing `tab` four more times.
 
-Known limit, stated rather than discovered: the full list **does not scroll**. It
-is truncated to the panel height, so on a repository with thirty branches in a
-nine-row panel you see the first nine and no more. If that is your situation,
-raise `branchLimit` and make the panel taller, or narrow it down with git
-directly.
+The cursor **clamps** at both ends rather than wrapping. In a windowed list,
+wrapping from the last row to the first moves the entire window at once, and from
+where you sit that looks like the list changed contents rather than like the
+cursor going home.
 
-**Clicking a branch row highlights it. It does not check out.** A checkout from a
-single click would change the working tree underneath an agent that may be
-editing files, and this panel runs without passing through Titah's permission
-dialog, so nothing would ask first. Highlighting is as far as it is willing to go
-without permission.
+Each section remembers its own cursor. Coming back to Branches after scrolling
+Commits puts you back on the row you left.
 
-## Why this package exists twice over
+## Why it is read-only, and will stay that way
 
-It is a git panel, and it is also the **reference extension** — the thing that
-proves Titah's extension API is enough before anyone else discovers it is not.
+No checkout, no staging, no stash apply. Not "not yet" — this panel runs inside
+the Titah process **without passing through the permission dialog**, so a
+keystroke that changed the working tree would never be shown to anyone first. And
+that working tree is being used by an agent that may be halfway through editing a
+file.
 
-So it imports exactly one thing:
+Watching is the whole feature. Use `git` for anything that writes.
 
-```ts
-import type { ExtensionFactory, View, ViewRow } from "titah-code/extension"
-```
+## Notes from building it
 
-That is not self-discipline. Titah's `package.json` declares `exports` with a
-single entry, so `titah-code/core/permission.js` fails to resolve at all — the
-allowlist in
-[`docs/extensions.md`](https://github.com/titah-dev/titah/blob/main/docs/extensions.md)
-is enforced by Node's resolver, not by a promise in a document.
-
-It also has **no runtime dependencies**. A panel that fails because of module
-resolution is a panel that fails for a reason with nothing to do with git.
-
-## Notes from writing it
-
-**Nothing here writes to your repo.** Every git call goes through
+**Nothing here writes to your repo.** Every call goes through
 `--no-optional-locks` with `GIT_OPTIONAL_LOCKS=0`. A panel that refreshes while
-you are mid-rebase must not touch `.git/index.lock` — that would break a rebase
-in a way nobody would ever connect back to a side panel.
+you are mid-rebase must not touch `.git/index.lock` — that breaks a rebase in a
+way nobody would connect back to a side panel.
 
-**`LC_ALL=C` on every call.** Without it the panel works on the author's machine
-and shows blank rows on anyone whose locale changes git's output.
+**All six git commands run concurrently.** Titah's render budget is two seconds.
+Run serially, a large repository waits for the sum of six commands, so the wait
+that passes on a small repo times out on exactly the repo that most needs the
+panel. There is a test that measures this rather than trusting the code's shape.
 
-**Not a git repo is a valid state, not a failure.** People open Titah in ordinary
-folders. A panel that reports `failed` there teaches people to ignore failure
-reports — including the real ones.
-
-**All four git commands run concurrently.** Titah's render budget is two seconds.
-Run serially, a large repo waits for the sum of four commands, so the wait that
-passes on a small repo times out on exactly the repo that most needs this panel.
-There is a test that measures this rather than trusting the code shape.
+**The current branch is forced to the top of Branches.** `--sort=-committerdate`
+gives an arbitrary order when branches point at the same commit, and it was
+measured putting `main` fourth — which in a three-row accordion means the branch
+you are actually on scrolls off the panel. The one thing you always need was the
+easiest thing to lose.
 
 **The `##` line is not a changed file.** `git status --porcelain=v1 --branch`
-prints a `## main...origin/main` header. Counting it makes a clean repo report
-one changed file — always, and nobody ever suspects the number one.
+prints a `## main...origin/main` header. Counting it makes a clean repository
+report one changed file — always, and nobody ever suspects the number one.
+
+**Paths are shortened from the front.** Titah truncates tails, which for a path
+throws away the only part that distinguishes it: two different files in the same
+directory would render identically. Here `src/tui/panels.ts` becomes
+`…i/panels.ts` — the filename survives.
+
+**Status spaces become `·`.** ` M` and `M ` are different states — worktree versus
+index — and a leading space is invisible.
+
+**`Stash (0)` is drawn, not hidden.** A section that disappears when empty makes
+the whole sidebar shift under your eyes every time you stash something.
 
 ## Tests
 
@@ -122,6 +124,11 @@ one changed file — always, and nobody ever suspects the number one.
 npm test
 ```
 
-Tests build against **real temporary git repositories**, never a faked `git`.
-Faking the output would only test our guess about its format, and the format is
-the part that actually differs between git versions.
+49 tests. The layout arithmetic — how many rows the open section gets, which
+window is visible when the cursor scrolls past the bottom, which screen row means
+what when clicked — lives in `src/sections.ts` as pure functions and is tested
+exhaustively, because a one-row drift there makes every click select its
+neighbour. Everything touching git is tested against **real temporary
+repositories**, never a faked `git`: faking the output would only test our guess
+about its format, and the format is the part that actually differs between git
+versions.

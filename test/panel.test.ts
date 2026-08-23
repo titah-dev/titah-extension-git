@@ -6,31 +6,33 @@ import path from "node:path"
 import test from "node:test"
 import type { View, ViewRow } from "titah-code/extension"
 import factory from "../src/panel.ts"
-import { snapshot } from "../src/git.ts"
+import { currentFirst, parseStatus, snapshot } from "../src/git.ts"
 
 /**
  * Repo sungguhan, bukan git yang dipalsukan.
  *
  * Memalsukan keluaran git berarti menguji tebakan kita tentang formatnya. Yang
- * benar-benar gagal di lapangan adalah format itu sendiri — `--porcelain=v1`
- * yang berbeda antar versi, baris `##` yang muncul atau tidak — dan tebakan
- * tidak bisa menangkapnya.
+ * benar-benar berbeda di lapangan adalah format itu sendiri — `--porcelain=v1`
+ * antar versi git, baris `##` yang muncul atau tidak, `%gd` di stash — dan
+ * tebakan tidak bisa menangkapnya.
  */
 function repo(): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "git-panel-"))
-  const run = (...args: string[]) =>
-    execFileSync("git", args, { cwd: directory, env: { ...process.env, LC_ALL: "C" }, stdio: "pipe" })
-
-  run("init", "-q", "-b", "main")
-  run("config", "user.email", "test@example.com")
-  run("config", "user.name", "Test")
+  git(directory, "init", "-q", "-b", "main")
+  git(directory, "config", "user.email", "test@example.com")
+  git(directory, "config", "user.name", "Test")
   fs.writeFileSync(path.join(directory, "a.txt"), "a\n")
-  run("add", "a.txt")
-  run("commit", "-q", "-m", "first")
+  git(directory, "add", "a.txt")
+  git(directory, "commit", "-q", "-m", "first")
   return directory
 }
 
-const request = { signal: AbortSignal.timeout(10_000), width: 16, rows: 12 }
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd, env: { ...process.env, LC_ALL: "C" }, stdio: "pipe" }).toString()
+}
+
+/** Panel 34 kolom → 30 di dalam bingkai, 20 baris isi. Bawaan yang dianjurkan. */
+const request = { signal: AbortSignal.timeout(10_000), width: 30, rows: 20 }
 
 function rowsOf(view: View): ViewRow[] {
   assert.equal(view.kind, "rows")
@@ -41,11 +43,258 @@ async function open(cwd: string, options: Record<string, unknown> = {}) {
   return await factory({ cwd, options })
 }
 
-test("branch saat ini jadi baris pertama dan ditandai terpilih", async () => {
+const texts = (rows: ViewRow[]): string[] => rows.map((row) => row.text)
+const headerIndex = (rows: ViewRow[], title: string) => texts(rows).findIndex((text) => text.startsWith(title))
+
+test("kelima kolom digambar dengan jumlahnya, dan Files terbuka lebih dulu", async () => {
+  const directory = repo()
+  fs.writeFileSync(path.join(directory, "b.txt"), "b\n")
+  const rows = rowsOf(await (await open(directory)).render(request))
+
+  for (const title of ["Files", "Worktrees", "Branches", "Commits", "Stash"]) {
+    assert.ok(headerIndex(rows, title) >= 0, `judul ${title} harus ada: ${JSON.stringify(texts(rows))}`)
+  }
+  assert.ok(texts(rows)[0]?.startsWith("Files (1)"), texts(rows)[0])
+  assert.match(texts(rows)[1] ?? "", /b\.txt/)
+})
+
+test("hanya satu judul berwarna — kolom yang aktif", async () => {
+  // Warna untuk "kolom ini aktif", tebal untuk "baris ini tersorot". Keduanya
+  // tebal berarti mata tidak bisa membedakan dua pertanyaan yang justru dijawab
+  // sidebar ini.
+  const rows = rowsOf(await (await open(repo())).render(request))
+  const colored = rows.filter((row) => row.color === "cyan")
+  assert.equal(colored.length, 1)
+  assert.ok(colored[0]?.text.startsWith("Files"))
+})
+
+test("judul Branches membawa branch saat ini, supaya terlihat saat kolom lain terbuka", async () => {
+  /*
+   * Accordion tidak menyisakan baris untuk itu, dan "branch apa yang sedang saya
+   * pakai" adalah satu-satunya informasi yang harus terlihat sepanjang waktu.
+   */
+  const rows = rowsOf(await (await open(repo())).render(request))
+  assert.match(texts(rows).find((text) => text.startsWith("Branches")) ?? "", /Branches \(1\) main/)
+})
+
+test("angka nol tidak memakan ruang di judul Branches", async () => {
+  const rows = rowsOf(await (await open(repo())).render(request))
+  const branches = texts(rows).find((text) => text.startsWith("Branches")) ?? ""
+  assert.ok(!branches.includes("↑0"), branches)
+  assert.ok(!branches.includes("↓0"), branches)
+})
+
+test("tab berputar melewati kelima kolom lalu kembali ke Files", async () => {
+  const panel = await open(repo())
+  const opened = async () => {
+    const rows = rowsOf(await panel.render(request))
+    return rows.find((row) => row.color === "cyan")?.text.split(" ")[0]
+  }
+  assert.equal(await opened(), "Files")
+  for (const expected of ["Worktrees", "Branches", "Commits", "Stash", "Files"]) {
+    assert.equal(panel.onKey?.({ key: "tab" })?.refresh, true)
+    assert.equal(await opened(), expected)
+  }
+})
+
+test("panah menggerakkan kursor, dan kursor menandai tepat satu baris", async () => {
+  const directory = repo()
+  for (const name of ["b.txt", "c.txt", "d.txt"]) fs.writeFileSync(path.join(directory, name), "x\n")
+  const panel = await open(directory)
+
+  const cursor = async () => {
+    const rows = rowsOf(await panel.render(request))
+    const marked = rows.filter((row) => row.selected === true)
+    assert.equal(marked.length, 1, `tepat satu kursor: ${JSON.stringify(texts(rows))}`)
+    return marked[0]?.text ?? ""
+  }
+
+  const first = await cursor()
+  assert.ok(first.startsWith("› "), first)
+  assert.equal(panel.onKey?.({ key: "down" })?.refresh, true)
+  assert.notEqual(await cursor(), first)
+  assert.equal(panel.onKey?.({ key: "up" })?.refresh, true)
+  assert.equal(await cursor(), first)
+})
+
+test("kursor DIJEPIT di kedua ujung, tidak berputar", async () => {
+  const directory = repo()
+  fs.writeFileSync(path.join(directory, "b.txt"), "b\n")
+  const panel = await open(directory)
+  await panel.render(request)
+
+  const before = rowsOf(await panel.render(request)).find((row) => row.selected)?.text
+  for (const key of ["up", "up", "down", "down"]) panel.onKey?.({ key })
+  assert.equal(rowsOf(await panel.render(request)).find((row) => row.selected)?.text, before)
+})
+
+test("setiap kolom mengingat kursornya sendiri", async () => {
+  /*
+   * Kembali ke satu kolom sesudah menyusuri kolom lain harus mengembalikan
+   * kursor ke baris yang sama. Satu kursor bersama membuat setiap perpindahan
+   * kehilangan tempat — dan pada daftar yang di-window, memindahkan jendelanya.
+   */
+  const directory = repo()
+  for (const name of ["b.txt", "c.txt", "d.txt"]) fs.writeFileSync(path.join(directory, name), "x\n")
+  for (const branch of ["x", "y", "z"]) git(directory, "branch", branch)
+  const panel = await open(directory)
+  await panel.render(request)
+
+  panel.onKey?.({ key: "down" })
+  panel.onKey?.({ key: "down" })
+  const filesCursor = rowsOf(await panel.render(request)).find((row) => row.selected)?.text
+
+  panel.onKey?.({ key: "tab" })
+  panel.onKey?.({ key: "tab" })
+  await panel.render(request)
+  panel.onKey?.({ key: "down" })
+  await panel.render(request)
+  for (let step = 0; step < 3; step++) panel.onKey?.({ key: "tab" })
+
+  assert.equal(rowsOf(await panel.render(request)).find((row) => row.selected)?.text, filesCursor)
+})
+
+test("daftar yang lebih panjang dari panel di-window, dan kursor tetap terlihat", async () => {
+  const directory = repo()
+  for (let index = 0; index < 40; index++) {
+    fs.writeFileSync(path.join(directory, `f${String(index).padStart(2, "0")}.txt`), "x\n")
+  }
+  const panel = await open(directory)
+  const short = { ...request, rows: 12 } // budget = 12 - 5 - 1 = 6
+
+  let rows = rowsOf(await panel.render(short))
+  const entries = (list: ViewRow[]) =>
+    list.filter((row) => row.text.startsWith("  ") || row.text.startsWith("› ")).length
+  assert.equal(entries(rows), 6)
+
+  for (let step = 0; step < 20; step++) panel.onKey?.({ key: "down" })
+  rows = rowsOf(await panel.render(short))
+  const marked = rows.filter((row) => row.selected === true)
+  assert.equal(marked.length, 1, "kursor tetap terlihat sesudah menggulir")
+  assert.match(marked[0]?.text ?? "", /f20\.txt/)
+  assert.equal(entries(rows), 6, "jendela tidak melebar")
+})
+
+test("klik pada judul membuka kolomnya", async () => {
+  const panel = await open(repo())
+  const target = headerIndex(rowsOf(await panel.render(request)), "Commits")
+  assert.ok(target > 0)
+  assert.equal(panel.onClick?.({ row: target })?.refresh, true)
+  assert.ok(
+    rowsOf(await panel.render(request))
+      .find((row) => row.color === "cyan")
+      ?.text.startsWith("Commits"),
+  )
+})
+
+test("klik pada judul yang SUDAH terbuka tidak meminta render ulang", async () => {
+  // Render ulang tanpa perubahan adalah enam pemanggilan git yang dibayar untuk
+  // hasil yang identik.
   const panel = await open(repo())
   const rows = rowsOf(await panel.render(request))
-  assert.equal(rows[0]?.text, "main")
-  assert.equal(rows[0]?.selected, true)
+  assert.equal(panel.onClick?.({ row: headerIndex(rows, "Files") }), undefined)
+})
+
+test("klik pada entri memindahkan kursor ke baris itu", async () => {
+  const directory = repo()
+  for (const name of ["b.txt", "c.txt", "d.txt"]) fs.writeFileSync(path.join(directory, name), "x\n")
+  const panel = await open(directory)
+  await panel.render(request)
+
+  // Judul Files di baris 0, entrinya di 1..3.
+  assert.equal(panel.onClick?.({ row: 3 })?.refresh, true)
+  const after = rowsOf(await panel.render(request))
+  assert.equal(after[3]?.selected, true)
+  assert.equal(after[1]?.selected, undefined)
+})
+
+test("klik pada baris petunjuk tidak melakukan apa pun", async () => {
+  const panel = await open(repo())
+  const rows = rowsOf(await panel.render(request))
+  const hint = texts(rows).findIndex((text) => text.includes("tab section"))
+  assert.ok(hint > 0)
+  assert.equal(panel.onClick?.({ row: hint }), undefined)
+})
+
+test("klik di luar batas baris tidak melempar", async () => {
+  const panel = await open(repo())
+  await panel.render(request)
+  assert.equal(panel.onClick?.({ row: 999 }), undefined)
+  assert.equal(panel.onClick?.({ row: -1 }), undefined)
+})
+
+test("kolom yang kosong mengatakan keadaannya", async () => {
+  const panel = await open(repo())
+  assert.ok(texts(rowsOf(await panel.render(request))).includes("  clean"))
+
+  for (let step = 0; step < 4; step++) panel.onKey?.({ key: "tab" })
+  assert.ok(texts(rowsOf(await panel.render(request))).includes("  empty"))
+})
+
+test("worktree kedua muncul di kolomnya", async () => {
+  const directory = repo()
+  const extra = path.join(directory, "..", `wt-${path.basename(directory)}`)
+  git(directory, "worktree", "add", "-q", "-b", "side", extra)
+  try {
+    const panel = await open(directory)
+    await panel.render(request)
+    panel.onKey?.({ key: "tab" })
+    const rows = rowsOf(await panel.render(request))
+    assert.match(texts(rows).find((text) => text.startsWith("Worktrees")) ?? "", /Worktrees \(2\)/)
+  } finally {
+    git(directory, "worktree", "remove", "--force", extra)
+  }
+})
+
+test("commit terbaca sebagai hash pendek plus subjeknya", async () => {
+  const directory = repo()
+  fs.writeFileSync(path.join(directory, "b.txt"), "b\n")
+  git(directory, "add", "b.txt")
+  git(directory, "commit", "-q", "-m", "kedua")
+
+  const panel = await open(directory)
+  await panel.render(request)
+  for (let step = 0; step < 3; step++) panel.onKey?.({ key: "tab" })
+  const rows = rowsOf(await panel.render(request))
+  assert.match(texts(rows).find((text) => text.startsWith("Commits")) ?? "", /Commits \(2\)/)
+  assert.match(texts(rows)[headerIndex(rows, "Commits") + 1] ?? "", /^› [0-9a-f]{7,} kedua/)
+})
+
+test("stash muncul dengan penanda dan pesannya", async () => {
+  const directory = repo()
+  fs.writeFileSync(path.join(directory, "a.txt"), "berubah\n")
+  git(directory, "stash", "push", "-q", "-m", "simpan-dulu")
+
+  const panel = await open(directory)
+  await panel.render(request)
+  for (let step = 0; step < 4; step++) panel.onKey?.({ key: "tab" })
+  const rows = rowsOf(await panel.render(request))
+  assert.match(texts(rows).find((text) => text.startsWith("Stash")) ?? "", /Stash \(1\)/)
+  assert.match(texts(rows)[headerIndex(rows, "Stash") + 1] ?? "", /stash@\{0\}/)
+})
+
+test("commitLimit membatasi yang ditampilkan", async () => {
+  const directory = repo()
+  for (let index = 0; index < 5; index++) {
+    fs.writeFileSync(path.join(directory, `c${index}.txt`), "x\n")
+    git(directory, "add", ".")
+    git(directory, "commit", "-q", "-m", `c${index}`)
+  }
+  const panel = await open(directory, { commitLimit: 3 })
+  await panel.render(request)
+  for (let step = 0; step < 3; step++) panel.onKey?.({ key: "tab" })
+  const rows = rowsOf(await panel.render(request))
+  assert.match(texts(rows).find((text) => text.startsWith("Commits")) ?? "", /Commits \(3\)/)
+})
+
+test("start memilih kolom yang terbuka pertama", async () => {
+  const rows = rowsOf(await (await open(repo(), { start: "commits" })).render(request))
+  assert.ok(rows.find((row) => row.color === "cyan")?.text.startsWith("Commits"))
+})
+
+test("start yang tidak dikenal jatuh ke Files, bukan ke panel kosong", async () => {
+  const rows = rowsOf(await (await open(repo(), { start: "tidak-ada" })).render(request))
+  assert.ok(rows.find((row) => row.color === "cyan")?.text.startsWith("Files"))
 })
 
 test("direktori yang bukan repo git bukan kegagalan", async () => {
@@ -59,116 +308,62 @@ test("direktori yang bukan repo git bukan kegagalan", async () => {
   assert.deepEqual(rows, [{ text: "not a git repo", dim: true }])
 })
 
-test("berkas yang berubah dihitung, dan baris ## tidak ikut dihitung", async () => {
+test("tombol selain tab, panah, dan r tidak melakukan apa pun", async () => {
   /*
-   * `git status --porcelain=v1 --branch` menambahkan satu baris `## main` di
-   * atas. Menghitungnya membuat repo yang bersih melaporkan satu berkas berubah
-   * — selalu, dan tanpa ada yang curiga pada angka satu.
+   * Panel ini HANYA memantau. Tidak ada tombol yang mengubah working tree, dan
+   * itu bukan karena belum kesampaian: panel berjalan tanpa melewati dialog izin
+   * Titah, jadi satu tekanan yang mengubah repo tidak akan pernah ditanyakan
+   * kepada siapa pun.
    */
-  const directory = repo()
-  const rows = rowsOf(await (await open(directory)).render(request))
-  assert.ok(!rows.some((row) => row.text.includes("changed")), JSON.stringify(rows))
-
-  fs.writeFileSync(path.join(directory, "b.txt"), "b\n")
-  const dirty = rowsOf(await (await open(directory)).render(request))
-  assert.ok(dirty.some((row) => row.text.includes("1 changed")), JSON.stringify(dirty))
-})
-
-test("angka nol tidak memakan baris", async () => {
-  // Di panel enam belas kolom, ruang lebih berharga daripada kelengkapan.
-  const rows = rowsOf(await (await open(repo())).render(request))
-  assert.ok(!rows.some((row) => row.text.includes("↑0") || row.text.includes("↓0")))
-})
-
-test("branch lain ditampilkan redup, dan dibatasi branchLimit", async () => {
-  const directory = repo()
-  const run = (...args: string[]) => execFileSync("git", args, { cwd: directory, stdio: "pipe" })
-  for (const name of ["x", "y", "z"]) run("branch", name)
-
-  const rows = rowsOf(await (await open(directory, { branchLimit: 2 })).render(request))
-  const others = rows.filter((row) => ["x", "y", "z"].includes(row.text))
-  assert.equal(others.length, 2)
-  assert.ok(others.every((row) => row.dim === true))
-})
-
-test("satu worktree TIDAK menampilkan daftar worktree", async () => {
-  // Satu worktree berarti tidak ada yang memakai worktree — itu repo biasa, dan
-  // daftar berisi satu baris hanya membuang ruang.
-  const rows = rowsOf(await (await open(repo())).render(request))
-  assert.ok(!rows.some((row) => row.text.includes("worktrees")), JSON.stringify(rows))
-})
-
-test("worktree kedua memunculkan daftarnya", async () => {
-  const directory = repo()
-  const extra = path.join(directory, "..", `wt-${path.basename(directory)}`)
-  execFileSync("git", ["worktree", "add", "-q", "-b", "side", extra], { cwd: directory, stdio: "pipe" })
-
-  const rows = rowsOf(await (await open(directory)).render(request))
-  assert.ok(rows.some((row) => row.text.includes("2 worktrees")), JSON.stringify(rows))
-
-  execFileSync("git", ["worktree", "remove", "--force", extra], { cwd: directory, stdio: "pipe" })
-})
-
-test("worktrees: false mematikan daftarnya meski ada dua", async () => {
-  const directory = repo()
-  const extra = path.join(directory, "..", `wt2-${path.basename(directory)}`)
-  execFileSync("git", ["worktree", "add", "-q", "-b", "side2", extra], { cwd: directory, stdio: "pipe" })
-
-  const rows = rowsOf(await (await open(directory, { worktrees: false })).render(request))
-  assert.ok(!rows.some((row) => row.text.includes("worktrees")))
-
-  execFileSync("git", ["worktree", "remove", "--force", extra], { cwd: directory, stdio: "pipe" })
-})
-
-test("tombol b berpindah ke daftar branch penuh dan kembali", async () => {
-  const directory = repo()
-  execFileSync("git", ["branch", "other"], { cwd: directory, stdio: "pipe" })
-  const panel = await open(directory, { branchLimit: 1 })
-
-  assert.equal(panel.onKey?.({ key: "b" })?.refresh, true)
-  const full = rowsOf(await panel.render(request))
-  assert.ok(full.some((row) => row.text === "b back"), JSON.stringify(full))
-
-  assert.equal(panel.onKey?.({ key: "b" })?.refresh, true)
-  const back = rowsOf(await panel.render(request))
-  // Dicocokkan ke `r refresh` — bagian petunjuk yang SELALU ada. Bagian `b`
-  // hanya muncul kalau ada branch yang tersembunyi, dan test ini tentang
-  // berpindah tampilan, bukan tentang isi petunjuknya.
-  assert.ok(back.some((row) => row.text.includes("r refresh")), JSON.stringify(back))
-})
-
-test("tombol r meminta refresh, tombol lain tidak", async () => {
   const panel = await open(repo())
-  assert.equal(panel.onKey?.({ key: "r" })?.refresh, true)
-  assert.equal(panel.onKey?.({ key: "q" }), undefined)
+  await panel.render(request)
+  for (const key of ["c", "s", "d", "x", "return", "delete", "a", "p"]) {
+    assert.equal(panel.onKey?.({ key }), undefined, `tombol ${key} harus diam`)
+  }
 })
 
 test("HEAD yang detached dikatakan apa adanya", async () => {
   const directory = repo()
-  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: directory, stdio: "pipe" }).toString().trim()
-  execFileSync("git", ["checkout", "-q", sha], { cwd: directory, stdio: "pipe" })
-
+  const sha = git(directory, "rev-parse", "HEAD").trim()
+  git(directory, "checkout", "-q", sha)
   const rows = rowsOf(await (await open(directory)).render(request))
-  assert.equal(rows[0]?.text, "detached HEAD")
+  assert.match(texts(rows).find((text) => text.startsWith("Branches")) ?? "", /detached/)
 })
 
 test("signal yang sudah dibatalkan tidak menggantung dan tidak melempar", async () => {
-  /*
-   * Titah membatalkan render saat panel ditutup atau saat timeout habis. Panel
-   * yang melempar di situ mengubah pembatalan yang normal jadi laporan gagal.
-   */
   const rows = rowsOf(await (await open(repo())).render({ ...request, signal: AbortSignal.abort() }))
   assert.deepEqual(rows, [{ text: "not a git repo", dim: true }])
 })
 
-test("snapshot menjalankan perintahnya bersamaan, bukan berurutan", async () => {
+// --- penguraian ------------------------------------------------------------
+
+test("baris ## milik --branch tidak dihitung sebagai berkas", () => {
+  // Menghitungnya membuat repo bersih selalu melaporkan satu perubahan — dan
+  // tidak ada yang curiga pada angka satu.
+  assert.deepEqual(parseStatus("## main...origin/main\n M src/a.ts\n"), [{ status: " M", path: "src/a.ts" }])
+  assert.deepEqual(parseStatus("## main\n"), [])
+})
+
+test("rename menyimpan nama BARU, bukan yang lama", () => {
+  // Itu berkas yang ada sekarang, dan itu yang dicari orang di daftar.
+  assert.deepEqual(parseStatus("R  lama.ts -> baru.ts\n"), [{ status: "R ", path: "baru.ts" }])
+})
+
+test("berkas tak terlacak dan yang di-stage dibedakan status duanya", () => {
+  assert.deepEqual(parseStatus("?? baru.ts\nA  ditambah.ts\nMM dua.ts\n"), [
+    { status: "??", path: "baru.ts" },
+    { status: "A ", path: "ditambah.ts" },
+    { status: "MM", path: "dua.ts" },
+  ])
+})
+
+test("snapshot menjalankan keenam perintahnya bersamaan, bukan berurutan", async () => {
   /*
-   * Batas waktu Titah dua detik. Berurutan, panel pada repo besar menunggu
-   * jumlah dari empat perintah — jadi penungguan yang lolos di repo kecil akan
-   * timeout di repo yang justru paling butuh panel ini.
+   * Batas waktu Titah dua detik, dan sekarang ada ENAM perintah git. Berurutan,
+   * panel pada repo besar menunggu jumlah keenamnya — jadi penungguan yang lolos
+   * di repo kecil akan timeout di repo yang justru paling butuh panel ini.
    *
-   * Diukur, bukan dibaca dari kode: empat panggilan git berurutan pada repo
-   * sekecil ini pun terukur lebih lambat dari satu putaran bersamaan.
+   * Diukur, bukan dibaca dari bentuk kode.
    */
   const directory = repo()
   const signal = AbortSignal.timeout(10_000)
@@ -183,107 +378,29 @@ test("snapshot menjalankan perintahnya bersamaan, bukan berurutan", async () => 
   assert.ok(parallelMs < serialMs, `bersamaan ${parallelMs}ms tidak lebih cepat dari ${serialMs}ms`)
 })
 
-test("klik pada baris branch menyorotinya, dan klik lagi melepasnya", async () => {
-  const directory = repo()
-  execFileSync("git", ["branch", "target"], { cwd: directory, stdio: "pipe" })
-  const panel = await open(directory)
-
-  const before = rowsOf(await panel.render(request))
-  const index = before.findIndex((row) => row.text === "target")
-  assert.ok(index > 0, "baris target harus ada")
-
-  assert.equal(panel.onClick?.({ row: index })?.refresh, true)
-  const after = rowsOf(await panel.render(request))
-  assert.equal(after[index]?.selected, true)
-  assert.equal(after[index]?.dim, undefined)
-
-  assert.equal(panel.onClick?.({ row: index })?.refresh, true)
-  const off = rowsOf(await panel.render(request))
-  assert.equal(off[index]?.selected, undefined)
-  assert.equal(off[index]?.dim, true)
-})
-
-test("klik pada baris yang BUKAN branch tidak melakukan apa pun", async () => {
+test("branch saat ini SELALU baris pertama, apa pun urutan committerdate", async () => {
   /*
-   * Panel menyisipkan baris kosong, baris hitungan, dan baris petunjuk di antara
-   * branch-nya. Tanpa peta baris, klik pada baris pemisah akan memilih branch
-   * yang salah tanpa satu pun tanda bahwa ia salah.
-   */
-  const panel = await open(repo())
-  const rows = rowsOf(await panel.render(request))
-  const hint = rows.findIndex((row) => row.text.includes("r refresh"))
-  assert.ok(hint > 0, "baris petunjuk harus ada")
-  assert.equal(panel.onClick?.({ row: hint }), undefined)
-
-  const blank = rows.findIndex((row) => row.text === "")
-  assert.ok(blank > 0, "baris pemisah harus ada")
-  assert.equal(panel.onClick?.({ row: blank }), undefined)
-
-  // Baris 0 adalah branch saat ini — itu baris branch yang SAH, jadi klik di
-  // sana memang bekerja. Yang tidak boleh bekerja hanyalah baris yang bukan
-  // branch.
-  assert.deepEqual(panel.onClick?.({ row: 0 }), { refresh: true })
-})
-
-test("klik di luar batas baris tidak melempar", async () => {
-  // Titah sudah menjepit indeksnya, tapi extension tidak boleh bergantung pada
-  // itu: satu perubahan tinggi panel di sisi Titah tidak boleh melempar di sini.
-  const panel = await open(repo())
-  await panel.render(request)
-  assert.equal(panel.onClick?.({ row: 999 }), undefined)
-  assert.equal(panel.onClick?.({ row: -1 }), undefined)
-})
-
-test("klik tetap bekerja di tampilan daftar branch penuh", async () => {
-  const directory = repo()
-  execFileSync("git", ["branch", "other"], { cwd: directory, stdio: "pipe" })
-  const panel = await open(directory)
-  await panel.render(request)
-  panel.onKey?.({ key: "b" })
-
-  const rows = rowsOf(await panel.render(request))
-  const index = rows.findIndex((row) => row.text === "other")
-  assert.ok(index >= 0)
-  panel.onClick?.({ row: index })
-  const after = rowsOf(await panel.render(request))
-  assert.equal(after[index]?.selected, true)
-})
-
-test("petunjuk `b` TIDAK diiklankan kalau semua branch sudah terlihat", async () => {
-  /*
-   * Diukur, bukan diduga: dengan branchLimit bawaan 12, repo biasa menampilkan
-   * seluruh branch-nya di summary — jadi mode `branches` tidak membawa satu pun
-   * branch tambahan. Tombol yang diiklankan tapi tidak menghasilkan apa pun
-   * mengajari orang bahwa petunjuk di panel ini tidak bisa dipercaya, dan itu
-   * merugikan `r` juga.
+   * Diukur pada repo demo, bukan diduga: `--sort=-committerdate` pada repo yang
+   * branch-nya menunjuk commit yang sama menghasilkan urutan sembarang, dan
+   * `main` mendarat di urutan keempat. Di accordion dengan tiga baris, itu
+   * berarti branch yang sedang dipakai tergeser keluar layar — informasi yang
+   * paling dibutuhkan justru yang paling mudah hilang.
    */
   const directory = repo()
-  for (const name of ["x", "y", "z"]) execFileSync("git", ["branch", name], { cwd: directory, stdio: "pipe" })
+  for (const branch of ["aaa", "bbb", "ccc", "zzz"]) git(directory, "branch", branch)
 
-  const rows = rowsOf(await (await open(directory)).render(request))
-  const hint = rows.at(-1)?.text ?? ""
-  assert.equal(hint, "r refresh")
-  assert.ok(!hint.includes("b "), hint)
-})
-
-test("petunjuk `b` muncul dengan JUMLAH yang tersembunyi kalau ada yang dipotong", async () => {
-  const directory = repo()
-  for (let index = 0; index < 5; index++) {
-    execFileSync("git", ["branch", `c${index}`], { cwd: directory, stdio: "pipe" })
-  }
-  // branchLimit 2 → tiga dari lima tersembunyi.
-  const rows = rowsOf(await (await open(directory, { branchLimit: 2 })).render(request))
-  assert.equal(rows.at(-1)?.text, "b +3 more · r refresh")
-})
-
-test("`b` tetap BEKERJA meski tidak diiklankan", async () => {
-  // Arah kesalahan yang benar: tombol yang ada tanpa dijanjikan hanya kejutan
-  // kecil, sedangkan tombol yang dijanjikan tanpa ada adalah janji yang
-  // dilanggar.
-  const directory = repo()
-  execFileSync("git", ["branch", "solo"], { cwd: directory, stdio: "pipe" })
   const panel = await open(directory)
-  assert.equal(rowsOf(await panel.render(request)).at(-1)?.text, "r refresh")
-  assert.equal(panel.onKey?.({ key: "b" })?.refresh, true)
-  assert.ok(rowsOf(await panel.render(request)).some((row) => row.text === "b back"))
+  await panel.render(request)
+  panel.onKey?.({ key: "tab" })
+  panel.onKey?.({ key: "tab" })
+  const rows = rowsOf(await panel.render(request))
+  const at = headerIndex(rows, "Branches")
+  assert.match(texts(rows)[at + 1] ?? "", /main$/, JSON.stringify(texts(rows)))
+})
+
+test("currentFirst tidak menduplikasi dan tidak menyentuh sisanya", () => {
+  assert.deepEqual(currentFirst(["a", "main", "b"], "main"), ["main", "a", "b"])
+  assert.deepEqual(currentFirst(["a", "b"], "main"), ["a", "b"], "branch yang tidak ada dibiarkan")
+  assert.deepEqual(currentFirst(["a", "b"], undefined), ["a", "b"], "detached HEAD")
+  assert.deepEqual(currentFirst([], "main"), [])
 })

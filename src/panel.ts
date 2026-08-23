@@ -1,186 +1,216 @@
 import type { ExtensionFactory, View, ViewRow } from "titah-code/extension"
 import { snapshot, type Snapshot } from "./git.ts"
+import {
+  moveCursor,
+  nextSection,
+  plan,
+  SECTIONS,
+  shortenPath,
+  type Row,
+  type SectionId,
+} from "./sections.ts"
 
 /**
- * Panel git untuk Titah.
+ * Sidebar git bergaya lazygit untuk Titah: Files, Worktrees, Branches, Commits,
+ * Stash — accordion, dengan kursor yang digerakkan panah.
  *
- * Ditulis HANYA dengan `titah-code/extension`. Tidak ada satu pun import dari
- * dalam Titah, dan itu bukan disiplin sukarela — `exports` di `package.json`
- * Titah menolak jalur lain. Kalau panel ini bisa dibuat berguna dengan
- * permukaan itu saja, maka permukaan itu cukup untuk orang lain juga; kalau
- * tidak, yang harus diperbaiki adalah permukaannya.
+ * Ditulis HANYA dengan `titah-code/extension`. Bukan disiplin sukarela: `exports`
+ * di package.json Titah menolak jalur lain. Kalau sidebar selengkap ini bisa
+ * dibuat dengan permukaan itu saja, maka permukaan itu cukup untuk orang lain.
+ *
+ * # Hanya memantau
+ *
+ * Tidak ada checkout, tidak ada stage, tidak ada stash apply. Bukan karena belum
+ * kesampaian — panel ini berjalan di dalam proses Titah TANPA melewati dialog
+ * izin, jadi satu tekanan tombol yang mengubah working tree tidak akan pernah
+ * ditanyakan kepada siapa pun. Dan working tree itu sedang dipakai agent yang
+ * mungkin di tengah menyunting berkas.
  */
 
 interface Options {
-  /** Batas jumlah branch yang ditampilkan. */
-  branchLimit?: number
-  /** Tampilkan daftar worktree. Mati kalau kamu tidak memakai worktree. */
-  worktrees?: boolean
+  /** Batas commit yang ditampilkan. Pembacaannya sendiri dibatasi COMMIT_LIMIT. */
+  commitLimit?: number
+  /** Kolom yang terbuka saat panel pertama kali digambar. */
+  start?: SectionId
 }
 
-/**
- * Dua tampilan, satu tombol.
- *
- * `summary` yang dibuka pertama karena itu yang dilihat orang sepanjang hari;
- * `branches` di belakang satu tekanan karena daftar penuh hanya dibutuhkan saat
- * benar-benar mencari sesuatu.
- */
-type Mode = "summary" | "branches"
+const EMPTY: Record<SectionId, string> = {
+  files: "clean",
+  worktrees: "none",
+  branches: "no local branches",
+  commits: "no commits",
+  stash: "empty",
+}
 
 const factory: ExtensionFactory = ({ cwd, options }) => {
   const settings = options as Options
-  const branchLimit = Math.max(1, settings.branchLimit ?? 12)
-  const showWorktrees = settings.worktrees !== false
+  const commitLimit = Math.max(1, settings.commitLimit ?? 50)
 
-  let mode: Mode = "summary"
+  let focused: SectionId = SECTIONS.some((section) => section.id === settings.start)
+    ? (settings.start as SectionId)
+    : "files"
 
   /*
-   * Baris terakhir yang digambar, disimpan supaya klik bisa dipetakan.
+   * Kursor per kolom, bukan satu kursor bersama.
    *
-   * Titah memberi INDEKS BARIS YANG DIGAMBAR, bukan indeks branch — dan panel
-   * ini menyisipkan baris kosong, baris hitungan, dan baris petunjuk di antara
-   * branch-nya. Tanpa peta ini, klik pada branch kedua akan mengenai baris
-   * pemisah dan tidak melakukan apa pun, atau lebih buruk: memilih branch yang
-   * salah tanpa satu pun tanda bahwa ia salah.
+   * Kembali ke Branches sesudah menyusuri Commits harus mengembalikanmu ke baris
+   * yang sama seperti saat kamu meninggalkannya. Satu kursor bersama membuat
+   * setiap perpindahan kolom kehilangan tempat — dan pada daftar yang di-window,
+   * itu juga memindahkan jendelanya.
    */
-  let drawn: (string | undefined)[] = []
-  let selected: string | undefined
+  const cursors: Record<SectionId, number> = {
+    files: 0,
+    worktrees: 0,
+    branches: 0,
+    commits: 0,
+    stash: 0,
+  }
+
+  /** Panjang tiap daftar dari render TERAKHIR, dibaca penanganan tombol. */
+  let counts: Record<SectionId, number> = { files: 0, worktrees: 0, branches: 0, commits: 0, stash: 0 }
+
+  /** Peta baris terakhir yang digambar, supaya klik memakai susunan yang sama. */
+  let drawn: Row[] = []
 
   return {
     title: "Git",
     side: "left",
     key: "<leader>g",
 
-    async render({ signal }): Promise<View> {
+    async render({ signal, width, rows }): Promise<View> {
       const state = await snapshot({ cwd, signal })
 
-      // Bukan repo git adalah keadaan yang SAH, bukan kegagalan. Panel yang
-      // melaporkan "failed" di folder biasa mengajari orang mengabaikan
-      // laporan gagal.
+      // Bukan repo git adalah keadaan yang SAH. Panel yang melaporkan "failed"
+      // di folder biasa mengajari orang mengabaikan laporan gagal.
       if (state.branch === undefined && !state.detached) {
+        drawn = []
         return { kind: "rows", rows: [{ text: "not a git repo", dim: true }] }
       }
 
-      const rows =
-        mode === "summary"
-          ? summaryRows(state, { branchLimit, showWorktrees, selected })
-          : branchRows(state, selected)
+      const lists = entriesFor(state, width, commitLimit)
+      counts = {
+        files: lists.files.length,
+        worktrees: lists.worktrees.length,
+        branches: lists.branches.length,
+        commits: lists.commits.length,
+        stash: lists.stash.length,
+      }
+      // Dijepit ulang setiap render: daftar bisa menyusut di antara dua render
+      // (berkas di-commit, stash dibuang), dan kursor yang tertinggal di luar
+      // batas akan menggambar penanda di baris yang tidak ada.
+      cursors[focused] = moveCursor(cursors[focused], 0, counts[focused])
 
-      // Peta klik dibangun dari baris yang SAMA dengan yang dikembalikan, bukan
-      // dihitung ulang dari state — dua sumber untuk satu daftar akan menyimpang
-      // tepat saat jumlah barisnya berubah.
-      drawn = rows.map((row) => (state.branches.includes(row.text) ? row.text : undefined))
-      return { kind: "rows", rows }
+      drawn = plan({
+        rows,
+        counts,
+        focused,
+        cursor: cursors[focused],
+        entries: lists[focused],
+        emptyLabel: EMPTY[focused],
+      })
+
+      return { kind: "rows", rows: drawn.map((row) => draw(row, state)) }
     },
 
     onKey({ key }) {
-      if (key === "b") {
-        mode = mode === "summary" ? "branches" : "summary"
+      if (key === "tab") {
+        focused = nextSection(focused)
+        return { refresh: true }
+      }
+      if (key === "up" || key === "down") {
+        /*
+         * Jumlah entri dibaca dari render TERAKHIR, bukan dihitung ulang dari
+         * git. Menghitung ulang di sini berarti memanggil git di penanganan
+         * tombol — dan kursor akan menjepit terhadap daftar yang berbeda dari
+         * yang sedang dilihat user.
+         */
+        cursors[focused] = moveCursor(cursors[focused], key === "up" ? -1 : 1, counts[focused])
         return { refresh: true }
       }
       if (key === "r") return { refresh: true }
+      return undefined
     },
 
-    /*
-     * Klik pada baris branch menyorotinya. TIDAK melakukan checkout.
-     *
-     * Checkout dari satu klik mengubah working tree di bawah agent yang mungkin
-     * sedang menyunting berkas — dan panel ini berjalan tanpa melewati dialog
-     * izin Titah, jadi tidak ada apa pun yang akan menanyakannya lebih dulu.
-     * Menyorot adalah yang paling jauh yang boleh dilakukan tanpa izin.
-     */
     onClick({ row }) {
-      const branch = drawn[row]
-      if (branch === undefined) return
-      selected = selected === branch ? undefined : branch
-      return { refresh: true }
+      const target = drawn[row]
+      if (target === undefined) return undefined
+
+      // Klik pada judul membuka kolomnya — satu-satunya cara memilih kolom tanpa
+      // memutar tab, dan judul adalah sasaran paling jelas di layar.
+      if (target.kind === "header") {
+        if (target.section === focused) return undefined
+        focused = target.section
+        return { refresh: true }
+      }
+      if (target.kind === "entry") {
+        cursors[target.section] = target.index
+        return { refresh: true }
+      }
+      return undefined
     },
   }
-}
-
-function summaryRows(
-  state: Snapshot,
-  limits: { branchLimit: number; showWorktrees: boolean; selected?: string },
-): ViewRow[] {
-  const rows: ViewRow[] = [
-    { text: state.detached ? "detached HEAD" : (state.branch ?? ""), selected: true },
-  ]
-
-  /*
-   * Angka nol tidak ditampilkan.
-   *
-   * "0 changed · 0 ahead" memakai tiga dari lima baris panel untuk mengatakan
-   * bahwa tidak ada yang perlu dikatakan — di panel enam belas kolom, ruang itu
-   * lebih berharga daripada kelengkapan.
-   */
-  const tally = [
-    state.changed > 0 ? `${state.changed} changed` : "",
-    state.ahead > 0 ? `↑${state.ahead}` : "",
-    state.behind > 0 ? `↓${state.behind}` : "",
-  ].filter(Boolean)
-  if (tally.length > 0) rows.push({ text: tally.join(" · "), color: "yellow" })
-
-  const candidates = state.branches.filter((branch) => branch !== state.branch)
-  const others = candidates.slice(0, limits.branchLimit)
-  const hidden = candidates.length - others.length
-  if (others.length > 0) {
-    rows.push({ text: "", dim: true })
-    for (const branch of others) {
-      rows.push(branch === limits.selected ? { text: branch, selected: true } : { text: branch, dim: true })
-    }
-  }
-
-  // Satu worktree berarti tidak ada yang memakai worktree — itu repo biasa, dan
-  // menampilkan daftar berisi satu baris hanya membuang ruang.
-  if (limits.showWorktrees && state.worktrees.length > 1) {
-    rows.push({ text: "", dim: true })
-    rows.push({ text: `${state.worktrees.length} worktrees`, dim: true })
-    for (const worktree of state.worktrees) {
-      rows.push({ text: basename(worktree), dim: true })
-    }
-  }
-
-  rows.push({ text: "", dim: true })
-  /*
-   * `b` diiklankan HANYA kalau ada branch yang tidak terlihat.
-   *
-   * Diukur, bukan diduga: dengan `branchLimit` bawaan 12, repo biasa
-   * menampilkan SELURUH branch-nya di summary — jadi mode `branches` tidak
-   * membawa satu pun branch tambahan, dan `b` hanya membuang baris hitungan
-   * lalu mengurutkan ulang. Tombol yang diiklankan tapi tidak menghasilkan apa
-   * pun mengajari orang bahwa petunjuk di panel ini tidak bisa dipercaya, dan
-   * itu merugikan `r` juga.
-   *
-   * Tombolnya tetap BEKERJA saat tidak diiklankan. Itu arah kesalahan yang
-   * benar: tombol yang ada tanpa dijanjikan hanya kejutan kecil, sedangkan
-   * tombol yang dijanjikan tanpa ada adalah janji yang dilanggar.
-   */
-  rows.push({ text: hidden > 0 ? `b +${hidden} more · r refresh` : "r refresh", dim: true })
-  return rows
-}
-
-function branchRows(state: Snapshot, selected?: string): ViewRow[] {
-  if (state.branches.length === 0) return [{ text: "no local branches", dim: true }]
-  return [
-    ...state.branches.map((branch) => ({
-      text: branch,
-      ...(branch === state.branch || branch === selected ? { selected: true } : { dim: true }),
-    })),
-    { text: "", dim: true },
-    { text: "b back", dim: true },
-  ]
 }
 
 /**
- * Nama direktori terakhir dari sebuah path.
+ * Isi setiap kolom sebagai teks, sudah dipendekkan ke lebar panel.
  *
- * Ditulis tangan alih-alih memakai `node:path` supaya modul ini tidak punya
- * ketergantungan runtime sama sekali — panel yang gagal karena resolusi modul
- * adalah panel yang gagal untuk alasan yang tidak ada hubungannya dengan git.
+ * Dipendekkan DI SINI dan bukan diserahkan ke Titah, karena aturannya berbeda
+ * per kolom: path dipotong dari DEPAN supaya nama berkasnya bertahan, sedangkan
+ * subjek commit dipotong dari belakang karena awalannya yang bermakna.
  */
-function basename(value: string): string {
-  const parts = value.split(/[/\\]/).filter(Boolean)
-  return parts[parts.length - 1] ?? value
+function entriesFor(state: Snapshot, width: number, commitLimit: number): Record<SectionId, string[]> {
+  // Dua kolom dipakai penanda kursor "› ", jadi teksnya dapat sisanya.
+  const inner = Math.max(1, width - 2)
+
+  return {
+    // Spasi di status diganti titik tengah: " M" dan "M " adalah dua keadaan
+    // berbeda (worktree vs index), dan spasi di awal baris tidak terlihat.
+    files: state.files.map((file) => `${file.status.replace(/ /g, "·")} ${shortenPath(file.path, inner - 3)}`),
+    worktrees: state.worktrees.map((path) => shortenPath(path, inner)),
+    branches: state.branches.map((branch) => shortenPath(branch, inner)),
+    commits: state.commits.slice(0, commitLimit).map((line) => line.slice(0, inner)),
+    stash: state.stash.map((line) => line.slice(0, inner)),
+  }
+}
+
+/**
+ * Satu baris peta jadi satu baris view.
+ *
+ * Judul yang fokus diberi WARNA, kursor diberi TEBAL — dua penanda berbeda untuk
+ * dua hal berbeda. Keduanya tebal berarti mata tidak bisa membedakan "kolom ini
+ * yang aktif" dari "baris ini yang tersorot", dan itu justru dua pertanyaan yang
+ * dijawab sidebar ini.
+ */
+function draw(row: Row, state: Snapshot): ViewRow {
+  switch (row.kind) {
+    case "header": {
+      const label = `${row.title} (${row.count})${row.section === "branches" ? headLabel(state) : ""}`
+      return row.focused ? { text: label, color: "cyan" } : { text: label, dim: true }
+    }
+    case "entry":
+      return row.cursor ? { text: `› ${row.text}`, selected: true } : { text: `  ${row.text}` }
+    case "empty":
+      return { text: `  ${row.text}`, dim: true }
+    case "hint":
+      return { text: row.text, dim: true }
+  }
+}
+
+/**
+ * Branch saat ini dan jarak ke remote, ditempel di judul Branches.
+ *
+ * Di judul dan bukan sebagai baris tersendiri: ini satu-satunya informasi yang
+ * harus terlihat SAAT kolom lain yang terbuka, dan accordion tidak menyisakan
+ * baris untuk itu. Angka nol dilewati — "↑0 ↓0" memakai ruang untuk mengatakan
+ * bahwa tidak ada yang perlu dikatakan.
+ */
+function headLabel(state: Snapshot): string {
+  const parts = [
+    state.detached ? "detached" : state.branch,
+    state.ahead > 0 ? `↑${state.ahead}` : "",
+    state.behind > 0 ? `↓${state.behind}` : "",
+  ].filter(Boolean)
+  return parts.length > 0 ? ` ${parts.join(" ")}` : ""
 }
 
 export default factory
