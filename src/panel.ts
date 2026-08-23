@@ -34,6 +34,18 @@ const factory: ExtensionFactory = ({ cwd, options }) => {
 
   let mode: Mode = "summary"
 
+  /*
+   * Baris terakhir yang digambar, disimpan supaya klik bisa dipetakan.
+   *
+   * Titah memberi INDEKS BARIS YANG DIGAMBAR, bukan indeks branch — dan panel
+   * ini menyisipkan baris kosong, baris hitungan, dan baris petunjuk di antara
+   * branch-nya. Tanpa peta ini, klik pada branch kedua akan mengenai baris
+   * pemisah dan tidak melakukan apa pun, atau lebih buruk: memilih branch yang
+   * salah tanpa satu pun tanda bahwa ia salah.
+   */
+  let drawn: (string | undefined)[] = []
+  let selected: string | undefined
+
   return {
     title: "Git",
     side: "left",
@@ -49,9 +61,16 @@ const factory: ExtensionFactory = ({ cwd, options }) => {
         return { kind: "rows", rows: [{ text: "not a git repo", dim: true }] }
       }
 
-      return mode === "summary"
-        ? { kind: "rows", rows: summaryRows(state, { branchLimit, showWorktrees }) }
-        : { kind: "rows", rows: branchRows(state) }
+      const rows =
+        mode === "summary"
+          ? summaryRows(state, { branchLimit, showWorktrees, selected })
+          : branchRows(state, selected)
+
+      // Peta klik dibangun dari baris yang SAMA dengan yang dikembalikan, bukan
+      // dihitung ulang dari state — dua sumber untuk satu daftar akan menyimpang
+      // tepat saat jumlah barisnya berubah.
+      drawn = rows.map((row) => (state.branches.includes(row.text) ? row.text : undefined))
+      return { kind: "rows", rows }
     },
 
     onKey({ key }) {
@@ -61,10 +80,28 @@ const factory: ExtensionFactory = ({ cwd, options }) => {
       }
       if (key === "r") return { refresh: true }
     },
+
+    /*
+     * Klik pada baris branch menyorotinya. TIDAK melakukan checkout.
+     *
+     * Checkout dari satu klik mengubah working tree di bawah agent yang mungkin
+     * sedang menyunting berkas — dan panel ini berjalan tanpa melewati dialog
+     * izin Titah, jadi tidak ada apa pun yang akan menanyakannya lebih dulu.
+     * Menyorot adalah yang paling jauh yang boleh dilakukan tanpa izin.
+     */
+    onClick({ row }) {
+      const branch = drawn[row]
+      if (branch === undefined) return
+      selected = selected === branch ? undefined : branch
+      return { refresh: true }
+    },
   }
 }
 
-function summaryRows(state: Snapshot, limits: { branchLimit: number; showWorktrees: boolean }): ViewRow[] {
+function summaryRows(
+  state: Snapshot,
+  limits: { branchLimit: number; showWorktrees: boolean; selected?: string },
+): ViewRow[] {
   const rows: ViewRow[] = [
     { text: state.detached ? "detached HEAD" : (state.branch ?? ""), selected: true },
   ]
@@ -86,7 +123,9 @@ function summaryRows(state: Snapshot, limits: { branchLimit: number; showWorktre
   const others = state.branches.filter((branch) => branch !== state.branch).slice(0, limits.branchLimit)
   if (others.length > 0) {
     rows.push({ text: "", dim: true })
-    for (const branch of others) rows.push({ text: branch, dim: true })
+    for (const branch of others) {
+      rows.push(branch === limits.selected ? { text: branch, selected: true } : { text: branch, dim: true })
+    }
   }
 
   // Satu worktree berarti tidak ada yang memakai worktree — itu repo biasa, dan
@@ -104,12 +143,12 @@ function summaryRows(state: Snapshot, limits: { branchLimit: number; showWorktre
   return rows
 }
 
-function branchRows(state: Snapshot): ViewRow[] {
+function branchRows(state: Snapshot, selected?: string): ViewRow[] {
   if (state.branches.length === 0) return [{ text: "no local branches", dim: true }]
   return [
     ...state.branches.map((branch) => ({
       text: branch,
-      ...(branch === state.branch ? { selected: true } : { dim: true }),
+      ...(branch === state.branch || branch === selected ? { selected: true } : { dim: true }),
     })),
     { text: "", dim: true },
     { text: "b back", dim: true },

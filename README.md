@@ -41,7 +41,15 @@ Or name it yourself:
 | `branchLimit` | `12` | How many other branches to list in the summary |
 | `worktrees` | `true` | Show the worktree list. Hidden anyway when there is only one |
 
-Inside the panel: `b` toggles the full branch list, `r` refreshes.
+Give the panel the keyboard with `Ctrl+X` `F`, then: `b` toggles the full branch
+list, `r` refreshes, `Esc` hands the keyboard back. `+` / `-` / `=` resize the
+panel — those are Titah's, not this extension's.
+
+**Clicking a branch row highlights it. It does not check out.** A checkout from a
+single click would change the working tree underneath an agent that may be
+editing files, and this panel runs without passing through Titah's permission
+dialog, so nothing would ask first. Highlighting is as far as it is willing to go
+without permission.
 
 ## Why this package exists twice over
 

@@ -179,3 +179,69 @@ test("snapshot menjalankan perintahnya bersamaan, bukan berurutan", async () => 
 
   assert.ok(parallelMs < serialMs, `bersamaan ${parallelMs}ms tidak lebih cepat dari ${serialMs}ms`)
 })
+
+test("klik pada baris branch menyorotinya, dan klik lagi melepasnya", async () => {
+  const directory = repo()
+  execFileSync("git", ["branch", "target"], { cwd: directory, stdio: "pipe" })
+  const panel = await open(directory)
+
+  const before = rowsOf(await panel.render(request))
+  const index = before.findIndex((row) => row.text === "target")
+  assert.ok(index > 0, "baris target harus ada")
+
+  assert.equal(panel.onClick?.({ row: index })?.refresh, true)
+  const after = rowsOf(await panel.render(request))
+  assert.equal(after[index]?.selected, true)
+  assert.equal(after[index]?.dim, undefined)
+
+  assert.equal(panel.onClick?.({ row: index })?.refresh, true)
+  const off = rowsOf(await panel.render(request))
+  assert.equal(off[index]?.selected, undefined)
+  assert.equal(off[index]?.dim, true)
+})
+
+test("klik pada baris yang BUKAN branch tidak melakukan apa pun", async () => {
+  /*
+   * Panel menyisipkan baris kosong, baris hitungan, dan baris petunjuk di antara
+   * branch-nya. Tanpa peta baris, klik pada baris pemisah akan memilih branch
+   * yang salah tanpa satu pun tanda bahwa ia salah.
+   */
+  const panel = await open(repo())
+  const rows = rowsOf(await panel.render(request))
+  const hint = rows.findIndex((row) => row.text.includes("b branches"))
+  assert.ok(hint > 0, "baris petunjuk harus ada")
+  assert.equal(panel.onClick?.({ row: hint }), undefined)
+
+  const blank = rows.findIndex((row) => row.text === "")
+  assert.ok(blank > 0, "baris pemisah harus ada")
+  assert.equal(panel.onClick?.({ row: blank }), undefined)
+
+  // Baris 0 adalah branch saat ini — itu baris branch yang SAH, jadi klik di
+  // sana memang bekerja. Yang tidak boleh bekerja hanyalah baris yang bukan
+  // branch.
+  assert.deepEqual(panel.onClick?.({ row: 0 }), { refresh: true })
+})
+
+test("klik di luar batas baris tidak melempar", async () => {
+  // Titah sudah menjepit indeksnya, tapi extension tidak boleh bergantung pada
+  // itu: satu perubahan tinggi panel di sisi Titah tidak boleh melempar di sini.
+  const panel = await open(repo())
+  await panel.render(request)
+  assert.equal(panel.onClick?.({ row: 999 }), undefined)
+  assert.equal(panel.onClick?.({ row: -1 }), undefined)
+})
+
+test("klik tetap bekerja di tampilan daftar branch penuh", async () => {
+  const directory = repo()
+  execFileSync("git", ["branch", "other"], { cwd: directory, stdio: "pipe" })
+  const panel = await open(directory)
+  await panel.render(request)
+  panel.onKey?.({ key: "b" })
+
+  const rows = rowsOf(await panel.render(request))
+  const index = rows.findIndex((row) => row.text === "other")
+  assert.ok(index >= 0)
+  panel.onClick?.({ row: index })
+  const after = rowsOf(await panel.render(request))
+  assert.equal(after[index]?.selected, true)
+})
