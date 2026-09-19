@@ -1,12 +1,12 @@
 {
   "name": "@titah/extension-git",
-  "version": "0.3.0",
-  "description": "lazygit-style git sidebar for Titah \u2014 files, worktrees, branches, commits, stash. Read-only.",
+  "version": "0.4.0",
+  "description": "lazygit-style git sidebar for Titah — files, worktrees, branches, commits, stash. Read-only.",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
     "node": ">=22.6",
-    "titah": "^0.4.0"
+    "titah": "^0.5.0"
   },
   "titah": {
     "panel": "./dist/panel.js"
@@ -22,7 +22,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "titah-code": "^0.4.0",
+    "titah-code": "^0.7.0",
     "typescript": "^5.9.0"
   },
   "keywords": [
